@@ -546,7 +546,19 @@ class KLAutoEncoder(nn.Module):
             x = self_ff(x) + x
 
         # cross attend from decoder queries to latents
-        queries_embeddings = self.point_embed(queries)
+        # queries_embeddings = self.point_embed(queries)
+
+        density = 128
+        gap = 2. / density
+        x = np.linspace(-1, 1, density + 1)  # [128]^3的网格，每个坐标上有129个点
+        y = np.linspace(-1, 1, density + 1)
+        z = np.linspace(-1, 1, density + 1)
+
+        xv, yv, zv = np.meshgrid(x, y, z)
+    # [3, 129, 129, 129] -> [3, 129 * 129 * 129] -> [129 * 129 * 129, 3] -> [1, 129 * 129 * 129, 3]
+        queries = torch.from_numpy(np.stack([xv, yv, zv]).astype(np.float32)).view(3, -1).transpose(0, 1)[None].to(x.device,
+                                                                                                            non_blocking=True)
+
         latents = self.decoder_cross_attn(queries_embeddings, context=x)
 
         # optional decoder feedforward
