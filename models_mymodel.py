@@ -108,6 +108,38 @@ class Attention(nn.Module):
         out = einops.rearrange(out, '(b h) n d -> b n (h d)', h = h)
         return self.drop_path(self.to_out(out))
 
+class PointEmbed(nn.Module):
+    def __init__(self, hidden_dim=48, dim=128):
+        super().__init__()
+
+        assert hidden_dim % 6 == 0
+
+        self.embedding_dim = hidden_dim
+        e = torch.pow(2, torch.arange(self.embedding_dim // 6)).float() * np.pi  # [2pi, 4pi, 8pi, ..., 2^(8)pi]
+        e = torch.stack([
+            torch.cat([e, torch.zeros(self.embedding_dim // 6),
+                       torch.zeros(self.embedding_dim // 6)]),
+            torch.cat([torch.zeros(self.embedding_dim // 6), e,
+                       torch.zeros(self.embedding_dim // 6)]),
+            torch.cat([torch.zeros(self.embedding_dim // 6),
+                       torch.zeros(self.embedding_dim // 6), e]),
+        ])
+        self.register_buffer('basis', e)  # 3 x 16
+
+        self.mlp = nn.Linear(self.embedding_dim + 3, dim)
+
+    @staticmethod
+    def embed(input, basis):
+        projections = torch.einsum(
+            'bnd,de->bne', input, basis)
+        embeddings = torch.cat([projections.sin(), projections.cos()], dim=2)
+        return embeddings
+
+    def forward(self, input):
+        # input: B x N x 3
+        embed = self.mlp(torch.cat([self.embed(input, self.basis), input], dim=2))  # B x N x C
+        return embed
+
 class DiagonalGaussianDistribution(object):
     def __init__(self, mean, logvar, deterministic=False):
         self.mean = mean # [B, M, C0]
@@ -429,6 +461,8 @@ class KLAutoEncoder(nn.Module):
             PreNorm(dim, FeedForward(dim))
         ])
 
+        self.point_pos_embed = PointEmbed(dim=dim)
+
         self.point_embed = GVAPatchEmbed(
             in_channels=1536,
             embed_channels=512,
@@ -502,14 +536,16 @@ class KLAutoEncoder(nn.Module):
         sampled_feat = feat[idx]
 
         ######
+        # FPS下采样得到M个点
         M = pc.shape[0] / B
         sampled_offset = torch.tensor([i * M for i in range(B + 1)], dtype=torch.int32, device=pc.device).contiguous()
 
         points = [pos, feat, offset]
         sampled_points = [sampled_pc, sampled_feat, sampled_offset]
 
+        # 融合了坐标和特征的下采样点特征
         _, sampled_pc_embeddings, _ = self.point_embed(points)
-
+        # 融合了坐标和特征的原始点特征
         _, pc_embeddings, _ = self.point_embed(sampled_points)
 
         sampled_pc_embeddings = sampled_pc_embeddings.view(B, M, -1)
@@ -537,8 +573,10 @@ class KLAutoEncoder(nn.Module):
 
         return kl, x
 
-    def decode(self, x, queries):
+    def decode(self, x):
         # [B, M, C0] -> [B, M, C]
+
+        B, M, D = x.shape
         x = self.proj(x)
 
         for self_attn, self_ff in self.layers:
@@ -550,15 +588,19 @@ class KLAutoEncoder(nn.Module):
 
         density = 128
         gap = 2. / density
-        x = np.linspace(-1, 1, density + 1)  # [128]^3的网格，每个坐标上有129个点
-        y = np.linspace(-1, 1, density + 1)
-        z = np.linspace(-1, 1, density + 1)
+        x_coor = np.linspace(-1, 1, density + 1)  # [128]^3的网格，每个坐标上有129个点
+        y_coor = np.linspace(-1, 1, density + 1)
+        z_coor = np.linspace(-1, 1, density + 1)
 
-        xv, yv, zv = np.meshgrid(x, y, z)
-    # [3, 129, 129, 129] -> [3, 129 * 129 * 129] -> [129 * 129 * 129, 3] -> [1, 129 * 129 * 129, 3]
+        xv, yv, zv = np.meshgrid(x_coor, y_coor, z_coor)
+        # [3, 129, 129, 129] -> [3, 129 * 129 * 129] -> [129 * 129 * 129, 3] -> [1, 129 * 129 * 129, 3]
         queries = torch.from_numpy(np.stack([xv, yv, zv]).astype(np.float32)).view(3, -1).transpose(0, 1)[None].to(x.device,
                                                                                                             non_blocking=True)
 
+        queries_repeated = queries.repeat(B, 1, 1)
+
+
+        queries_embeddings = self.point_pos_embed(queries_repeated) # [B, M, C(512)]
         latents = self.decoder_cross_attn(queries_embeddings, context=x)
 
         # optional decoder feedforward
