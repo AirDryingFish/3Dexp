@@ -10,6 +10,41 @@ import sys
 # 1) 屏蔽 Open3D 的日志(如Poisson采样输出)
 o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
 
+def normalize_mesh(mesh):
+    """
+    Normalizes the 3D mesh by scaling and translating it to fit in a unit cube centered at the origin.
+
+    Args:
+        mesh (o3d.geometry.TriangleMesh): The input mesh to be normalized.
+
+    Returns:
+        Tuple[float, np.ndarray]: The scale factor and the offset applied to the mesh.
+    """
+    # 计算原始包围盒的最小点和最大点
+    bbox = mesh.get_axis_aligned_bounding_box()
+    bbox_min = np.asarray(bbox.min_bound)
+    bbox_max = np.asarray(bbox.max_bound)
+
+    # 计算最大边长
+    max_dim = np.max(bbox_max - bbox_min)
+    scale = 1.0 / max_dim  # 缩放因子
+
+    # 将网格缩放到单位立方体
+    mesh.scale(scale, center=(bbox_min + bbox_max) / 2)
+
+    # 重新计算缩放后的包围盒
+    bbox = mesh.get_axis_aligned_bounding_box()
+    bbox_min = np.asarray(bbox.min_bound)
+    bbox_max = np.asarray(bbox.max_bound)
+
+    # 计算平移量，确保网格的中心位于原点
+    center = (bbox_min + bbox_max) / 2
+    offset = -center  # 平移到原点
+
+    # 应用平移
+    mesh.translate(offset)
+
+    return scale, offset
 
 def load_triangle_mesh_with_open3d(mesh_file):
     """
@@ -33,6 +68,7 @@ def poisson_disk_sampling(mesh_file, out_file, number_of_points=50000, init_fact
         print(f"Skip {mesh_file} because mesh is invalid.")
         return 0
 
+    # normalize_mesh(mesh)
     pcd = mesh.sample_points_poisson_disk(
         number_of_points=number_of_points,
         init_factor=init_factor,
@@ -138,7 +174,7 @@ def main():
                 progress_bar.update(1)
 
                 # 每满10条, 写一次 CSV
-                if count_since_last_write >= 100:
+                if count_since_last_write >= 1000:
                     new_df = pd.DataFrame(partial_buffer)
                     partial_buffer.clear()  # 清空buffer
                     df_sampled = pd.concat([df_sampled, new_df], ignore_index=True)

@@ -11,7 +11,8 @@ from torch.functional import F
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
-
+from safetensors.torch import save_file
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
 ###############################################################################
 # 1. 单个模型的处理函数（不变）
 ###############################################################################
@@ -44,32 +45,64 @@ def compute_intrinsics_from_fov(camera_angle_x, width, height):
 def apply_scale_offset(points, scale, offset):
     """ 将 points 从原坐标系转换到渲染使用的坐标系 """
     offset = np.array(offset, dtype=np.float32).reshape(1, 3)
-    new_points = (points - offset) / scale
+    new_points = points * scale + offset
     return new_points
+
+# def compute_uv_coordinates_and_weights(points_w, normals_w, extrinsics, intrinsics, image_width, image_height):
+#     """ 计算 3D 点的 UV 坐标（归一化到 [-1,1]）及与相机方向的余弦权重 """
+#     N = points_w.shape[0]
+#     points_h = np.hstack([points_w, np.ones((N, 1))])  # (N, 4)
+#     points_h = torch.tensor(points_h, dtype=torch.float32)
+#
+#     normals_w = torch.tensor(normals_w, dtype=torch.float32)
+#
+#     # world->camera
+#     cam_coords = points_h @ extrinsics.T  # [N,4]
+#     cam_xyz = cam_coords[:, :3] / (cam_coords[:, 3:] + 1e-8)  # (N,3)
+#
+#     # camera coords -> pixel coords
+#     proj_2d = cam_xyz @ intrinsics.T  # (N,3)
+#     eps = 1e-8
+#     x_pix = proj_2d[:, 0] / (proj_2d[:, 2] + eps)
+#     y_pix = proj_2d[:, 1] / (proj_2d[:, 2] + eps)
+#
+#     u_norm = (x_pix / image_width) * 2 - 1
+#     v_norm = (y_pix / image_height) * 2 - 1
+#     uv = torch.stack([u_norm, v_norm], dim=-1)  # (N,2)
+#
+#     # 法线与相机前向方向的余弦(假设+Z是前向)
+#     camera_dir_cam = torch.tensor([0, 0, 1], dtype=torch.float32)
+#     R = extrinsics[:3, :3]
+#     normals_cam = normals_w @ R.T
+#     cos_theta = torch.sum(normals_cam * camera_dir_cam, dim=-1)
+#     weights = torch.clamp(cos_theta, min=0.0)
+#
+#     return uv, weights
 
 def compute_uv_coordinates_and_weights(points_w, normals_w, extrinsics, intrinsics, image_width, image_height):
     """ 计算 3D 点的 UV 坐标（归一化到 [-1,1]）及与相机方向的余弦权重 """
     N = points_w.shape[0]
+    # 转换为齐次坐标，并转换为 torch tensor
     points_h = np.hstack([points_w, np.ones((N, 1))])  # (N, 4)
     points_h = torch.tensor(points_h, dtype=torch.float32)
-
     normals_w = torch.tensor(normals_w, dtype=torch.float32)
 
-    # world->camera
-    cam_coords = points_h @ extrinsics.T  # [N,4]
-    cam_xyz = cam_coords[:, :3] / (cam_coords[:, 3:] + 1e-8)  # (N,3)
+    # world -> camera 坐标转换
+    cam_coords = points_h @ extrinsics.T  # (N, 4)
+    cam_xyz = cam_coords[:, :3] / (cam_coords[:, 3:] + 1e-8)  # (N, 3)
 
-    # camera coords -> pixel coords
-    proj_2d = cam_xyz @ intrinsics.T  # (N,3)
+    # camera coords -> 像素坐标
+    proj_2d = cam_xyz @ intrinsics.T  # (N, 3)
     eps = 1e-8
     x_pix = proj_2d[:, 0] / (proj_2d[:, 2] + eps)
     y_pix = proj_2d[:, 1] / (proj_2d[:, 2] + eps)
 
-    u_norm = (x_pix / image_width) * 2 - 1
-    v_norm = (y_pix / image_height) * 2 - 1
-    uv = torch.stack([u_norm, v_norm], dim=-1)  # (N,2)
+    # 根据正确代码的归一化方式，先减去图像中心，再除以半宽高
+    u_norm = (x_pix - image_width / 2) / (image_width / 2)
+    v_norm = (y_pix - image_height / 2) / (image_height / 2)
+    uv = torch.stack([u_norm, v_norm], dim=-1)  # (N, 2)
 
-    # 法线与相机前向方向的余弦(假设+Z是前向)
+    # 计算法线与相机前向（假设+Z为前向）方向的余弦权重
     camera_dir_cam = torch.tensor([0, 0, 1], dtype=torch.float32)
     R = extrinsics[:3, :3]
     normals_cam = normals_w @ R.T
@@ -107,9 +140,14 @@ def process_and_extract_features(row, model, preprocess, base_path, device, num_
     fps_out_path = os.path.join(out_point_fps_dir, f"{sha}_fps.ply")
     o3d.io.write_point_cloud(fps_out_path, pcd_downsampled)
 
+    ### !!! 坐标系变换 !!!
+    R = np.array([[1, 0, 0],  # x轴不变
+                  [0, 0, -1],  # y轴变为-z轴
+                  [0, 1, 0]]) # z轴变为y轴
+    ### !!!!!!!!!!!!!!!!!
 
-    points = np.asarray(pcd_downsampled.points)  # 提取下采样后的点云
-    normals = np.asarray(pcd_downsampled.normals)  # 提取法向量
+    points = np.asarray(pcd_downsampled.points) @ R.T  # 提取下采样后的点云
+    normals = np.asarray(pcd_downsampled.normals) @ R.T  # 提取法向量
 
     render_dir = os.path.join(base_path, "renders", sha)
     tfm_path = os.path.join(render_dir, "transforms.json")
@@ -202,16 +240,15 @@ def process_and_extract_features(row, model, preprocess, base_path, device, num_
         mode='bilinear',
         align_corners=False,
     ).squeeze(2).permute(0, 2, 1)
-
+    # print(sampled)
     weights_tensor = torch.stack(all_weights, dim=0).to(device)  # [n_views, N]
     final_features = weighted_average_features(sampled, weights_tensor)
 
     out_dir = "/mnt/merged_nvme/lht/TRELLIS/objaverse_sketchfab/features"
-    out_point_fps_dir = "/mnt/merged_nvme/lht/TRELLIS/objaverse_sketchfab/fps_downsample"
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, f"{sha}.pt")
-    # np.savez_compressed(out_path, final_features.cpu().numpy())
-    torch.save(final_features, out_path)
+    out_path = os.path.join(out_dir, f"{sha}.safetensors")
+    # torch.save(final_features, out_path)
+    save_file({"final_features": final_features.cpu()}, out_path)
 
     return {
         "sha256": sha,
@@ -229,10 +266,18 @@ def main():
     df_meta = pd.read_csv(csv_metadata_path)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # rank = int(os.environ["RANK"])
+    # print(rank)
+    # device = torch.device(f"cuda:{rank}")
+    # torch.distributed.init_process_group("nccl", device_id=device)
+
     model = AutoModel.from_pretrained('facebook/dinov2-with-registers-giant').to(device).eval()
 
     # 使用 DataParallel 进行多GPU推理
-    model = torch.nn.DataParallel(model)  # 自动将模型复制到多个GPU
+    # model = torch.nn.DataParallel(model)  # 自动将模型复制到多个GPU
+
+
     model = model.to(device)
 
     image_width = 518
@@ -258,7 +303,7 @@ def main():
 
     rows = df_todo.to_dict("records")
 
-    max_workers = 1
+    max_workers = 4
     partial_buffer = []
     count_since_last_write = 0
 

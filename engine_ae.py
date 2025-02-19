@@ -46,7 +46,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         print('log_dir: {}'.format(log_writer.log_dir))
 
     # 返回data_loader的一个batch
-    for data_iter_step, (points, labels, surface, _, _) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+    for data_iter_step, (points, labels, surface, _,) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
 
         # we use a per iteration (instead of per epoch) lr scheduler
         if data_iter_step % accum_iter == 0:
@@ -154,7 +154,7 @@ def evaluate(data_loader, model, device):
     # switch to evaluation mode
     model.eval()
 
-    for points, labels, surface, _, _ in metric_logger.log_every(data_loader, 50, header):
+    for points, labels, surface, _ in metric_logger.log_every(data_loader, 50, header):
 
         points = points.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)

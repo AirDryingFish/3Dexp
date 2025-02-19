@@ -44,11 +44,27 @@ def merge_outer_shell_by_union(mesh_or_scene):
     result = union(sub_meshes, engine='scad')
     return result
 
+def normalize_mesh(mesh):
+    """Normalizes the mesh by scaling and translating it to fit in a unit cube centered at the origin."""
+    # 获取原始包围盒
+    bbox_min, bbox_max = mesh.bounds
+    scale = 1 / np.max(bbox_max - bbox_min)  # 计算缩放因子，使最长边为1
+    mesh.apply_scale(scale)
+
+    # 更新缩放后的包围盒
+    bbox_min, bbox_max = mesh.bounds
+    center = (bbox_min + bbox_max) / 2
+    offset = -center  # 计算平移量：将中心移到原点，因此取负值
+    mesh.apply_translation(offset)
+
+    return scale, offset
+
 def load_outer_shell_via_union(mesh_path):
     """
     载入多子mesh场景 => 做布尔并 => 返回单一外壳
     """
     loaded = trimesh.load(mesh_path, force='mesh', skip_missing=True)
+    normalize_mesh(loaded)
     if isinstance(loaded, trimesh.Scene):
         merged = merge_outer_shell_by_union(loaded)
         # 对合并结果做清理
@@ -364,6 +380,9 @@ def run_sharp_edge_sampling(
     # print(f"Loading mesh from: {mesh_path}")
     mesh = load_outer_shell_via_union(mesh_path)
     # print(f"[DEBUG] {mesh_path} => faces={len(mesh.faces)}, verts={len(mesh.vertices)}")
+
+
+
     # 根据包围盒对角线归一化r_threshold
     min_corner, max_corner = mesh.bounds
     diag_len = np.linalg.norm(max_corner - min_corner)

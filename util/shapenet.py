@@ -126,6 +126,7 @@ class ShapeNet(data.Dataset):
         point_path = os.path.join(self.point_folder, category, model+'.npz')
 
         image = None
+        image_emb = None
 
         if self.image_folder != None:
             image_renders_path = os.path.join(self.image_folder, category, model + '_dino.pt')
@@ -182,18 +183,13 @@ class ShapeNet(data.Dataset):
         if self.transform:
             surface, points = self.transform(surface, points)
 
+        # print(f"points: {points.type()}")
+        # print(f"points: {labels.type()}")
+        # print(f"points: {surface.type()}")
         if self.return_surface:
-            if image_emb != None:
-                return points, labels, surface, category_ids[category], image_emb
-            else:
-                print(f"没有这个模型: {image_renders_path}!!!!")
-                return
+            return points, labels, surface, category_ids[category]
         else:
-            if image != None:
-                return points, labels, category_ids[category], image_emb
-            else:
-                print(f"没有这个模型: {image_renders_path}!!!!")
-                return
+            return points, labels, category_ids[category]
 
     def __len__(self):
         if self.split != 'train':

@@ -1,7 +1,7 @@
 import torch
 
 from .shapenet import ShapeNet
-
+from .TrellisDataset import TrellisDataset
 
 category_ids = {
     '02691156': 0,
@@ -100,13 +100,30 @@ def build_shape_surface_occupancy_dataset_with_image_cond(split, args):
         # transform = #transforms.Compose([
         transform = AxisScaling((0.75, 1.25), True)
         # ])
-        return ShapeNet(args.data_path, split=split, transform=transform, sampling=True, num_samples=1024, return_surface=True, surface_sampling=True, pc_size=args.point_cloud_size, image_folder=args.image_renders_path, categories=None)
+        return ShapeNet(args.data_path, split=split, categories=category_keys, transform=transform, sampling=True, num_samples=1024, return_surface=True, surface_sampling=True, pc_size=args.point_cloud_size)
     elif split == 'val':
         # return ShapeNet(args.data_path, split=split, transform=None, sampling=True, num_samples=1024, return_surface=True, surface_sampling=True, pc_size=args.point_cloud_size)
-        return ShapeNet(args.data_path, split=split, transform=None, sampling=False, return_surface=True, surface_sampling=True, pc_size=args.point_cloud_size, image_folder=args.image_renders_path, categories=None)
+        return ShapeNet(args.data_path, split=split, transform=None, sampling=False, return_surface=True, surface_sampling=True, pc_size=args.point_cloud_size)
     else:
-        return ShapeNet(args.data_path, split=split, transform=None, sampling=False, return_surface=True, surface_sampling=True, pc_size=args.point_cloud_size, image_folder=args.image_renders_path, categories=None)
+        return ShapeNet(args.data_path, split=split, transform=None, sampling=False, return_surface=True, surface_sampling=True, pc_size=args.point_cloud_size)
 
+
+def build_shape_surface_sdf_dataset(split, args):
+    if split == 'train':
+        transform = AxisScaling((0.75, 1.25), True)
+
+        return TrellisDataset(args.data_path, split=split, transform=transform, sampling=True, num_samples=1024,
+                        return_surface=True, surface_sampling=True, pc_size=args.point_cloud_size,
+                        image_folder=args.image_renders_path, categories=None)
+    elif split == 'val':
+        # return ShapeNet(args.data_path, split=split, transform=None, sampling=True, num_samples=1024, return_surface=True, surface_sampling=True, pc_size=args.point_cloud_size)
+        return TrellisDataset(args.data_path, split=split, transform=None, sampling=False, return_surface=True,
+                        surface_sampling=True, pc_size=args.point_cloud_size, image_folder=args.image_renders_path,
+                        categories=None)
+    else:
+        return TrellisDataset(args.data_path, split=split, transform=None, sampling=False, return_surface=True,
+                        surface_sampling=True, pc_size=args.point_cloud_size, image_folder=args.image_renders_path,
+                        categories=None)
 
 
 if __name__ == '__main__':

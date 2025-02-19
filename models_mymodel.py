@@ -573,7 +573,7 @@ class KLAutoEncoder(nn.Module):
 
         return kl, x
 
-    def decode(self, x):
+    def decode(self, x, queries):
         # [B, M, C0] -> [B, M, C]
 
         B, M, D = x.shape
@@ -586,22 +586,12 @@ class KLAutoEncoder(nn.Module):
         # cross attend from decoder queries to latents
         # queries_embeddings = self.point_embed(queries)
 
-        density = 128
-        gap = 2. / density
-        x_coor = np.linspace(-1, 1, density + 1)  # [128]^3的网格，每个坐标上有129个点
-        y_coor = np.linspace(-1, 1, density + 1)
-        z_coor = np.linspace(-1, 1, density + 1)
-
-        xv, yv, zv = np.meshgrid(x_coor, y_coor, z_coor)
-        # [3, 129, 129, 129] -> [3, 129 * 129 * 129] -> [129 * 129 * 129, 3] -> [1, 129 * 129 * 129, 3]
-        queries = torch.from_numpy(np.stack([xv, yv, zv]).astype(np.float32)).view(3, -1).transpose(0, 1)[None].to(x.device,
-                                                                                                            non_blocking=True)
-
-        queries_repeated = queries.repeat(B, 1, 1)
+        # [B, 129^3, 3]
+        queries = queries.to(x.device, non_blocking=True)
 
 
-        queries_embeddings = self.point_pos_embed(queries_repeated) # [B, M, C(512)]
-        latents = self.decoder_cross_attn(queries_embeddings, context=x)
+        # queries_embeddings = self.point_pos_embed(queries_repeated) # [B, M, C(512)]
+        latents = self.decoder_cross_attn(queries, context=x)
 
         # optional decoder feedforward
         if exists(self.decoder_ff):
