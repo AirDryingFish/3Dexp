@@ -12,6 +12,10 @@ from torch_cluster import fps
 
 from timm.models.layers import DropPath
 import pointops
+from extensions.FlexiCubes.flexicubes import FlexiCubes
+import extensions.FlexiCubes.examples.render as df_render
+from extensions.FlexiCubes.examples import util
+from extensions.FlexiCubes.examples.util import *
 
 def exists(val):
     return val is not None
@@ -443,7 +447,8 @@ class KLAutoEncoder(nn.Module):
             heads=8,
             dim_head=64,
             weight_tie_layers=False,
-            decoder_ff=False
+            decoder_ff=False,
+            voxel_grid_res=128
     ):
         super().__init__()
 
@@ -502,11 +507,21 @@ class KLAutoEncoder(nn.Module):
         self.decoder_ff = PreNorm(queries_dim, FeedForward(queries_dim)) if decoder_ff else None
 
         self.to_outputs = nn.Linear(queries_dim, output_dim) if exists(output_dim) else nn.Identity()
+        self.fc_params_predictor = nn.Linear(queries_dim, 1 + 3 + 21)
+
 
         self.proj = nn.Linear(latent_dim, dim)
 
         self.mean_fc = nn.Linear(dim, latent_dim)
         self.logvar_fc = nn.Linear(dim, latent_dim)
+
+        self.fc = FlexiCubes()
+        self.voxel_grid_res = voxel_grid_res
+        self.register_buffer("x_nx3", self.flexicubes.construct_voxel_grid(self.voxel_grid_res)[0])
+        self.register_buffer("cube_fx8", self.flexicubes.construct_voxel_grid(self.voxel_grid_res)[1])
+
+        self.all_edges = self.cube_fx8[:, self.fc.cube_edges].reshape(-1, 2)
+        self.grid_edges = torch.unique(self.all_edges, dim=0)
 
     def encode(self, pc, pc_feat):
         # pc: B x N x 3
@@ -573,7 +588,96 @@ class KLAutoEncoder(nn.Module):
 
         return kl, x
 
-    def decode(self, x, queries):
+    # [B, 129^3, 21] -> [B, 128^3, 21]
+    def get_cube_weight(self, pred_point_weight):
+        grid_features = []
+        # self.x_nx3
+        B = pred_point_weight.shape[0]
+        for b in range(B):
+            grid_list = []
+            for i in range(self.cube_fx8.shape[0]):
+                point_indices = self.cube_fx8[i, :]
+                grid_points = pred_point_weight[b, point_indices, :] # [ 8, 21]
+                aggregated_grid_point = grid_points.mean(dim=0)  # 聚合为一个网格特征 [21]
+                grid_list.append(aggregated_grid_point)
+            grid_features.append(torch.stack(grid_list, dim=0)) # list(B) [128^3, 21]
+        grid_features = torch.stack(grid_features, dim=0) # [B, 128^3, 21]
+
+        return grid_features
+
+    def get_fc_output(self, pred_sdf, pred_deform, cube_weight):
+        batch = pred_sdf.shape[0]
+        list_vertices = []
+        list_faces = []
+        list_losses = []
+        for b in range(batch):
+            sdf = pred_sdf[b, :, :]
+            deform = pred_deform[b, :, :]
+            weight = cube_weight[b, :, :]
+            grid_verts = self.x_nx3 + (1.0 - 1e-8) / (self.voxel_grid_res * 2) * torch.tanh(deform)
+            vertices, faces, L_dev = self.fc(grid_verts, sdf, self.cube_fx8, self.voxel_grid_res, beta_fx12=weight[:, :12],
+                                        alpha_fx8=weight[:, 12:20],
+                                        gamma_f=weight[:, 20], training=True)
+            list_vertices.append(vertices)
+            list_faces.append(faces)
+            list_losses.append(L_dev)
+
+        # batch_vertices = torch.stack(list_vertices, dim=0)
+        # batch_faces = torch.stack(list_faces, dim=0)
+
+        # [B*C]
+        L_dev = torch.cat(list_losses).mean()
+
+        return list_vertices, list_faces, L_dev
+
+    def render_mesh(self, list_vertices, list_faces, cam_mv_list, cam_mvp_list, render_res=512):
+        return_value_list = []
+        for i_mesh in range(len(list_vertices)):
+            flexicubes_mesh = Mesh(list_vertices[i_mesh], list_faces)
+
+            return_value = df_render.render_mesh_paper(
+                flexicubes_mesh,
+                cam_mv_list[i_mesh],
+                cam_mvp_list[i_mesh],
+                render_res,
+            )
+            return_value_list.append(return_value)
+
+
+    # def get_random_cam(self, batch_size, fovy = np.deg2rad(45), iter_res=[512,512], cam_near_far=[0.1, 1000.0], cam_radius=1.5, device="cuda"):
+    #     def get_random_camera():
+    #         proj_mtx = util.perspective(fovy, iter_res[1] / iter_res[0], cam_near_far[0], cam_near_far[1])
+    #         mv     = util.translate(0, 0, -cam_radius) @ util.random_rotation_translation(0.125)
+    #         mvp    = proj_mtx @ mv
+    #         return mv, mvp
+    #     mv_batch = []
+    #     mvp_batch = []
+    #     for i in range(batch_size):
+    #         mv, mvp = get_random_camera()
+    #         mv_batch.append(mv)
+    #         mvp_batch.append(mvp)
+    #     return torch.stack(mv_batch).to(device), torch.stack(mvp_batch).to(device)
+    #     # return mv_batch, mvp_batch
+
+
+    def get_predicted_fc(self, fc_latents):
+        batch = fc_latents.shape[0]
+        pred_sdf = batch[:, :, 0] # [B, 129^3, 1]
+        pred_deform = batch[:, :, 1: 4] # [B, 129^3, 3]
+        pred_weight = batch[:, :, 4:] # [B, 129^3, 21]
+
+        cube_weight = self.get_cube_weight(pred_weight) # [B, 128^3, 21]
+
+        list_vertices, list_faces, L_dev = self.get_fc_output(pred_sdf, pred_deform, cube_weight)
+
+        list_flexicubes_mesh = []
+        for i_mesh in range(len(list_vertices)):
+            flexicubes_mesh = Mesh(list_vertices[i_mesh], list_faces[i_mesh])
+            list_flexicubes_mesh.append(flexicubes_mesh)
+
+        return list_flexicubes_mesh, L_dev, pred_sdf, cube_weight
+
+    def decode(self, x):
         # [B, M, C0] -> [B, M, C]
 
         B, M, D = x.shape
@@ -587,8 +691,7 @@ class KLAutoEncoder(nn.Module):
         # queries_embeddings = self.point_embed(queries)
 
         # [B, 129^3, 3]
-        queries = queries.to(x.device, non_blocking=True)
-
+        queries = self.x_nx3.to(x.device, non_blocking=True)
 
         # queries_embeddings = self.point_pos_embed(queries_repeated) # [B, M, C(512)]
         latents = self.decoder_cross_attn(queries, context=x)
@@ -597,15 +700,26 @@ class KLAutoEncoder(nn.Module):
         if exists(self.decoder_ff):
             latents = latents + self.decoder_ff(latents)
 
-        return self.to_outputs(latents)
+        fc_params = self.fc_params_predictor(latents)
 
-    def forward(self, pc, queries, pc_feat):
+        list_flexicubes_mesh, L_dev, pred_sdf, cube_weight = self.get_predicted_fc(fc_params)
+
+        # return self.to_outputs(latents)
+        return list_flexicubes_mesh, L_dev, pred_sdf, cube_weight
+
+    def forward(self, pc, pc_feat):
         kl, x = self.encode(pc, pc_feat)
 
-        o = self.decode(x, queries).squeeze(-1)
+        list_flexicubes_mesh, L_dev, pred_sdf, cube_weight = self.decode(x)
 
         # return o.squeeze(-1), kl
-        return {'logits': o, 'kl': kl}
+        return {
+                'list_mesh': list_flexicubes_mesh,
+                'kl': kl, 'sdf': pred_sdf,
+                'grid_edges': self.grid_edges,
+                'weight': cube_weight,
+                'L_dev': L_dev
+                }
 
 
 

@@ -82,6 +82,24 @@ class AxisScaling(object):
 
         return surface, point
 
+class AxisScaling_surface(object):
+    def __init__(self, interval=(0.75, 1.25), jitter=True):
+        assert isinstance(interval, tuple)
+        self.interval = interval
+        self.jitter = jitter
+
+    def __call__(self, surface):
+        scaling = torch.rand(1, 3) * 0.5 + 0.75
+        surface = surface * scaling
+
+        scale = (1 / torch.abs(surface).max().item()) * 0.999999
+        surface *= scale
+
+        if self.jitter:
+            surface += 0.005 * torch.randn_like(surface)
+            surface.clamp_(min=-1, max=1)
+
+        return surface
 
 def build_shape_surface_occupancy_dataset(split, args):
     if split == 'train':
@@ -110,7 +128,7 @@ def build_shape_surface_occupancy_dataset_with_image_cond(split, args):
 
 def build_shape_surface_sdf_dataset(split, args):
     if split == 'train':
-        transform = AxisScaling((0.75, 1.25), True)
+        transform = AxisScaling_surface((0.75, 1.25), True)
 
         return TrellisDataset(args.data_path, split=split, transform=transform, sampling=True, num_samples=1024,
                         return_surface=True, surface_sampling=True, pc_size=args.point_cloud_size,

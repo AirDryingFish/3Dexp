@@ -12,6 +12,8 @@ import open3d as o3d
 import numpy as np
 import pandas as pd
 from PIL import Image
+from safetensors.torch import load_file
+from extensions.FlexiCubes.examples.util import *
 
 # import h5py
 
@@ -73,8 +75,11 @@ class TrellisDataset(data.Dataset):
         fps_downsample_path = self.models[idx]['fps_downsample_path']
         feature_path = self.models[idx]['feature_path']
         label_path = self.models[idx]['label_path']
+        mesh_path = os.path.join(self.base_path, self.models[idx]['local_path'])
 
-        image = None
+        gt_mesh = load_mesh(mesh_path, 'cuda')
+
+        # image = None
 
         # if self.image_folder != None:
         #     image_renders_path = os.path.join(self.image_folder, category, model + '_dino.pt')
@@ -103,40 +108,21 @@ class TrellisDataset(data.Dataset):
                 surface = surface[ind]
             surface = torch.from_numpy(surface)
 
-        # if self.sampling:
-        #     ind = np.random.default_rng().choice(vol_points.shape[0], self.num_samples, replace=False)
-        #     vol_points = vol_points[ind]
-        #     vol_label = vol_label[ind]
-        #
-        #     ind = np.random.default_rng().choice(near_points.shape[0], self.num_samples, replace=False)
-        #     near_points = near_points[ind]
-        #     near_label = near_label[ind]
-
-        queries_label = torch.from_numpy(queries_label).float()
-
-        labels = queries_label
-        density = 128
-        x_coor = np.linspace(-0.5, 0.5, density + 1)  # [128]^3的网格，每个坐标上有129个点
-        y_coor = np.linspace(-0.5, 0.5, density + 1)
-        z_coor = np.linspace(-0.5, 0.5, density + 1)
-
-        xv, yv, zv = np.meshgrid(x_coor, y_coor, z_coor)
-        # [3, 129, 129, 129] -> [3, 129 * 129 * 129] -> [129 * 129 * 129, 3]
-        points = torch.from_numpy(np.stack([xv, yv, zv]).astype(np.float32)).view(3, -1).transpose(0, 1)
-
-        feat = torch.load(feature_path)
+        data = load_file(feature_path)
+        feat = data['final_features']
         if self.transform:
-            surface, points = self.transform(surface, points)
+            surface = self.transform(surface)
 
         if self.return_surface:
-            return points, labels, surface, feat
+            return surface, gt_mesh, feat
 
         else:
-            return points, labels, feat
+            return gt_mesh, feat
+
+
 
     def __len__(self):
         if self.split != 'train':
             return len(self.models)
         else:
             return len(self.models) * self.replica
-
