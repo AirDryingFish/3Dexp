@@ -150,6 +150,12 @@ def main(args):
     else:
         log_writer = None
 
+    def collate_fn(batch):
+        mesh = [item[0] for item in batch]
+        surface = torch.stack([item[1] for item in batch])
+        feat = torch.stack([item[2] for item in batch])
+        return mesh, surface, feat
+
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train, sampler=sampler_train,
         batch_size=args.batch_size,
@@ -157,6 +163,7 @@ def main(args):
         pin_memory=args.pin_mem,
         drop_last=True,
         prefetch_factor=2,
+        collate_fn=collate_fn,
     )
 
     data_loader_val = torch.utils.data.DataLoader(
@@ -166,7 +173,8 @@ def main(args):
         # num_workers=args.num_workers,
         num_workers=1,
         pin_memory=args.pin_mem,
-        drop_last=False
+        drop_last=False,
+        collate_fn = collate_fn,
     )
 
     # 根据args.model来选择不同的create_autoencoder参数

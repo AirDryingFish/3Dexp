@@ -18,7 +18,7 @@ from extensions.FlexiCubes.examples.util import *
 # import h5py
 
 class TrellisDataset(data.Dataset):
-    def __init__(self, dataset_folder, split, base_path = "/mnt/merged_nvme/lht/TRELLIS/objaverse_sketchfab", categories=['03001627'], transform=None, sampling=True, num_samples=4096,
+    def __init__(self, split, base_path = "/mnt/merged_nvme/lht/TRELLIS/objaverse_sketchfab", categories=['03001627'], transform=None, sampling=True, num_samples=4096,
                  return_surface=True, surface_sampling=True, pc_size=2048, replica=16, image_folder=None):
 
         self.pc_size = pc_size
@@ -40,13 +40,15 @@ class TrellisDataset(data.Dataset):
         self.df_meta = pd.read_csv(self.metadata_path)
         # self.point_path = self.df_meta
         self.models = []
+        print(f"This is {self.split} Dataset.")
         for _, row in self.df_meta.iterrows():
-            self.models.append({
-                'sha256': row['sha256'],
-                'feature_path': row['feature_path'],
-                'fps_downsample_path': row['fps_downsample_path']
-            })
-
+            if row['split'] == self.split:
+                self.models.append({
+                    'sha256': row['sha256'],
+                    'feature_path': row['feature_path'],
+                    'fps_downsample_path': row['fps_downsample_path']
+                })
+        print(f"Totally {len(self.models)} models in {self.split} Dataset.")
         # self.image_folder = image_folder
         # self.image_cond_transform = transforms.ToTensor()
 
