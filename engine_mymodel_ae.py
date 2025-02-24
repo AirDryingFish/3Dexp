@@ -57,13 +57,14 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
 
         surface = surface.to(device, non_blocking=True)
+        feat = feat.to(device, non_blocking=True)
         for item in gt_mesh:
             item.vertices = item.vertices.to(device, non_blocking=True)
             item.faces = item.faces.to(device, non_blocking=True)
 
         with torch.cuda.amp.autocast(enabled=False):
             # model进行inference
-            outputs = model(surface)  # [B, 2048]
+            outputs = model(surface, feat)  # [B, 2048]
             if 'kl' in outputs:
                 loss_kl = outputs['kl']
                 loss_kl = torch.sum(loss_kl) / loss_kl.shape[0]  # loss_kl : [B]
@@ -168,6 +169,7 @@ def evaluate(data_loader, model, device, epoch, display_res=[512,512],
             metric_logger.log_every(data_loader, print_freq, header)):
         # 将 surface 放到 device 上
         surface = surface.to(device, non_blocking=True)
+        feat = feat.to(device, non_blocking=True)
         # 对 gt_mesh_batch 中的每个 Mesh 对象，也将其数据放到 device 上
         for mesh in gt_mesh_batch:
             mesh.vertices = mesh.vertices.to(device, non_blocking=True)
@@ -175,7 +177,7 @@ def evaluate(data_loader, model, device, epoch, display_res=[512,512],
 
 
         # 此处可以调用模型进行推理（如果需要），例如：
-        outputs = model(surface)
+        outputs = model(surface, feat)
         # 此处我们不计算 loss，而是使用后处理模块 fc 得到预测网格
         # 假设 grid_verts、sdf、cube_fx8、weight 等在数据集中或前面已经计算好
         # 注意：这里 training=False，表示在评估时提取预测网格
@@ -204,7 +206,7 @@ def evaluate(data_loader, model, device, epoch, display_res=[512,512],
         # 拼接预测与 gt 图像，并保存
         import imageio
         combined = np.concatenate([val_image, gt_image], axis=1)
-        out_dir = f"test/{epoch}"
+        out_dir = f"val_output_images/{epoch}"
 
         imageio.imwrite(os.path.join(out_dir, f'{data_iter_step}.png'), combined)
         print(f"Evaluation Step [{epoch}], saved visualization image.")
