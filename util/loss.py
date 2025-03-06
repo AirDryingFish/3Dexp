@@ -4,7 +4,9 @@ import torch.nn.functional as F
 import extensions.FlexiCubes.examples.render as df_renderer
 import extensions.FlexiCubes.examples.util as utils
 from extensions.FlexiCubes.examples.loss import sdf_reg_loss
+from extensions.FlexiCubes.examples.util import *
 import numpy as np
+import psutil
 
 class MeshLoss(nn.Module):
     def __init__(self, sdf_regularizer=1.0):
@@ -34,7 +36,7 @@ class MeshLoss(nn.Module):
         """计算正则化损失：包括SDF正则化、L_dev正则化和权重的L1正则化"""
         # 根据t_iter逐步调整SDF正则化权重
         # sdf_weight = self.sdf_regularizer - (self.sdf_regularizer - self.sdf_regularizer / 20) * min(1.0, 4.0 * t_iter)
-        reg_loss = sdf.reg_loss(sdf, grid_edges).mean()  # SDF正则化
+        reg_loss = sdf_reg_loss(sdf, grid_edges).mean()  # SDF正则化
         reg_loss += (weight[:, :20]).abs().mean() * 0.2  # 权重的L1正则化
         return reg_loss
 
@@ -48,12 +50,12 @@ class MeshLoss(nn.Module):
         mvp_batch = []
         for i in range(batch_size):
             mv, mvp = get_random_camera()
-            mv_batch.append(mv)
-            mvp_batch.append(mvp)
+            mv_batch.append(mv.detach())
+            mvp_batch.append(mvp.detach())
         return torch.stack(mv_batch).to(device), torch.stack(mvp_batch).to(device)
         # return mv_batch, mvp_batch
 
-    def forward(self, predicted_mesh_list, target_mesh_list, sdf, grid_edges, weight, L_dev, train_res = 512):
+    def forward(self, predicted_mesh_list, target_mesh_vertices, target_mesh_faces, sdf, grid_edges, weight, L_dev, train_res = [512,512]):
         """计算总损失"""
         batch_size = len(predicted_mesh_list)
         cam_mv, cam_mvp = self.get_random_cam(batch_size)
@@ -62,9 +64,11 @@ class MeshLoss(nn.Module):
         depth_list_pred = []
         depth_list_target = []
         reg_loss = []
-        for i_mesh in batch_size:
+        for i_mesh in range(batch_size):
             pred = self.renderer.render_mesh_paper(predicted_mesh_list[i_mesh], cam_mv[i_mesh].unsqueeze(0), cam_mvp[i_mesh].unsqueeze(0), train_res)
-            target = self.renderer.render_mesh_paper(target_mesh_list[i_mesh], cam_mv[i_mesh].unsqueeze(0),
+
+            target_mesh = Mesh(target_mesh_vertices[i_mesh], target_mesh_faces[i_mesh])
+            target = self.renderer.render_mesh_paper(target_mesh, cam_mv[i_mesh].unsqueeze(0),
                                                    cam_mvp[i_mesh].unsqueeze(0), train_res)
             mask_list_pred.append(pred['mask'])
             mask_list_target.append(target['mask'])
@@ -79,7 +83,7 @@ class MeshLoss(nn.Module):
         depth_pred = torch.stack(depth_list_pred) # [B, 512, 512, 4]
         depth_target = torch.stack(depth_list_target)
 
-        reg_loss = torch.cat(reg_loss).mean()
+        reg_loss = torch.stack(reg_loss).mean()
 
         total_mask_loss = self.compute_mask_loss(mask_pred, mask_target)
         total_depth_loss = self.compute_depth_loss(depth_pred, depth_target, mask_target)
@@ -87,5 +91,11 @@ class MeshLoss(nn.Module):
         reg_loss += L_dev * 0.5  # L_dev正则化
         # 汇总所有损失
         total_loss = total_mask_loss + total_depth_loss + reg_loss
+
+        # del mask_list_pred, mask_list_target, depth_list_pred, depth_list_target, pred, target, predicted_mesh_list, target_mesh_list
+        # del mask_pred, mask_target, depth_pred, depth_target, reg_loss, cam_mv, cam_mvp
+
+        import gc
+        gc.collect()
 
         return total_loss

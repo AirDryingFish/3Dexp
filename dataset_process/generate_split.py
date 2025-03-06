@@ -19,6 +19,6 @@ def add_train_val_test_split(input_csv, output_csv):
 
 
 if __name__ == "__main__":
-    input_csv = "/mnt/merged_nvme/lht/TRELLIS/objaverse_sketchfab/metadata.csv"  # 修改为你的 CSV 文件路径
-    output_csv = "/mnt/merged_nvme/lht/TRELLIS/objaverse_sketchfab/metadata_split.csv"  # 修改为你希望保存的文件路径
+    input_csv = "/data/3D_Dataset/TRELLIS/objaverse_sketchfab/metadata.csv"  # 修改为你的 CSV 文件路径
+    output_csv = "/data/3D_Dataset/TRELLIS/objaverse_sketchfab/metadata.csv"  # 修改为你希望保存的文件路径
     add_train_val_test_split(input_csv, output_csv)

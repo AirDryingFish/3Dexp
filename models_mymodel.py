@@ -437,7 +437,7 @@ class KLAutoEncoder(nn.Module):
             dim=512,
             queries_dim=512,
 
-            patch_embed_groups=6,
+            patch_embed_groups=8,
             patch_embed_neighbours=8,
 
             output_dim=1,
@@ -448,7 +448,7 @@ class KLAutoEncoder(nn.Module):
             dim_head=64,
             weight_tie_layers=False,
             decoder_ff=False,
-            voxel_grid_res=128
+            voxel_grid_res=64,
     ):
         super().__init__()
 
@@ -466,14 +466,14 @@ class KLAutoEncoder(nn.Module):
             PreNorm(dim, FeedForward(dim))
         ])
 
-        self.point_pos_embed = PointEmbed(dim=dim)
+        self.point_pos_embed = PointEmbed(dim=queries_dim)
 
         self.point_embed = GVAPatchEmbed(
-            in_channels=1536,
-            embed_channels=512,
+            in_dim=1536,
+            embed_dim=512,
             groups=patch_embed_groups,
             depth=1,
-            neighbours=patch_embed_neighbours,
+            neighbors=patch_embed_neighbours,
             qkv_bias=True,
             pe_multiplier=True,
             pe_bias=True,
@@ -506,8 +506,9 @@ class KLAutoEncoder(nn.Module):
                                           context_dim=dim)
         self.decoder_ff = PreNorm(queries_dim, FeedForward(queries_dim)) if decoder_ff else None
 
-        self.to_outputs = nn.Linear(queries_dim, output_dim) if exists(output_dim) else nn.Identity()
+        # self.to_outputs = nn.Linear(queries_dim, output_dim) if exists(output_dim) else nn.Identity()
         self.fc_params_predictor = nn.Linear(queries_dim, 1 + 3 + 21)
+        self._init_weights()
 
 
         self.proj = nn.Linear(latent_dim, dim)
@@ -517,11 +518,37 @@ class KLAutoEncoder(nn.Module):
 
         self.fc = FlexiCubes()
         self.voxel_grid_res = voxel_grid_res
-        self.register_buffer("x_nx3", self.flexicubes.construct_voxel_grid(self.voxel_grid_res)[0])
-        self.register_buffer("cube_fx8", self.flexicubes.construct_voxel_grid(self.voxel_grid_res)[1])
+        self.register_buffer("x_nx3", self.fc.construct_voxel_grid(self.voxel_grid_res)[0])
+        self.register_buffer("cube_fx8", self.fc.construct_voxel_grid(self.voxel_grid_res)[1])
 
         self.all_edges = self.cube_fx8[:, self.fc.cube_edges].reshape(-1, 2)
-        self.grid_edges = torch.unique(self.all_edges, dim=0)
+        self._grid_edges = torch.unique(self.all_edges, dim=0)
+        self.register_buffer("grid_edges", self._grid_edges)
+
+        self.x_nx3 = self.x_nx3.detach()
+        self.cube_fx8 = self.cube_fx8.detach()
+        self.grid_edges = self.grid_edges.detach()
+
+    def _init_weights(self):
+        # 先使用线性层默认(或其它自定义)初始化
+        # 例如 xavier, normal_ 等
+        nn.init.xavier_normal_(self.fc_params_predictor.weight)
+        nn.init.zeros_(self.fc_params_predictor.bias)
+
+        # 然后将后 (3 + 21) = 24 个输出通道的权重和偏置全部置为 0
+        with torch.no_grad():
+            # 权重的形状是 [out_features, in_features]
+            # 前 1 个输出通道是第 0 行，后 24 个输出通道是第 1~24 行
+            self.fc_params_predictor.weight[1:] = 0.0
+
+            # 偏置的形状是 [out_features]
+            # 将后 24 个的偏置也设为 0
+            self.fc_params_predictor.bias[1:] = 0.0
+
+            # self.fc_params_predictor.weight.fill_(0.0)
+            # b_sdf = torch.empty((1,)).uniform_(-0.1, 0.9)
+            # self.fc_params_predictor.bias.copy_(b_sdf)
+
 
     def encode(self, pc, pc_feat):
         # pc: B x N x 3
@@ -539,7 +566,7 @@ class KLAutoEncoder(nn.Module):
 
         offset = torch.tensor([i * N for i in range(B + 1)], dtype=torch.int32, device=pc.device).contiguous()
         ### compute neighbor index
-        reference_index, _ = pointops.knn_query(self.k, self.groups, offset)
+        reference_index, _ = pointops.knn_query(16, pos, offset)
 
         # num_inputs：输入点数
         # num_latents：期望降维点数
@@ -552,16 +579,16 @@ class KLAutoEncoder(nn.Module):
 
         ######
         # FPS下采样得到M个点
-        M = pc.shape[0] / B
+        M = sampled_pc.shape[0] // B
         sampled_offset = torch.tensor([i * M for i in range(B + 1)], dtype=torch.int32, device=pc.device).contiguous()
 
         points = [pos, feat, offset]
         sampled_points = [sampled_pc, sampled_feat, sampled_offset]
 
         # 融合了坐标和特征的下采样点特征
-        _, sampled_pc_embeddings, _ = self.point_embed(points)
+        _, sampled_pc_embeddings, _ = self.point_embed(sampled_points)
         # 融合了坐标和特征的原始点特征
-        _, pc_embeddings, _ = self.point_embed(sampled_points)
+        _, pc_embeddings, _ = self.point_embed(points)
 
         sampled_pc_embeddings = sampled_pc_embeddings.view(B, M, -1)
         pc_embeddings = pc_embeddings.view(B, N, -1)
@@ -590,19 +617,10 @@ class KLAutoEncoder(nn.Module):
 
     # [B, 129^3, 21] -> [B, 128^3, 21]
     def get_cube_weight(self, pred_point_weight):
-        grid_features = []
-        # self.x_nx3
-        B = pred_point_weight.shape[0]
-        for b in range(B):
-            grid_list = []
-            for i in range(self.cube_fx8.shape[0]):
-                point_indices = self.cube_fx8[i, :]
-                grid_points = pred_point_weight[b, point_indices, :] # [ 8, 21]
-                aggregated_grid_point = grid_points.mean(dim=0)  # 聚合为一个网格特征 [21]
-                grid_list.append(aggregated_grid_point)
-            grid_features.append(torch.stack(grid_list, dim=0)) # list(B) [128^3, 21]
-        grid_features = torch.stack(grid_features, dim=0) # [B, 128^3, 21]
-
+        # 使用高级索引，得到形状 [B, C, 8, 21]
+        grid_points = pred_point_weight[:, self.cube_fx8, :]
+        # 在维度 2 上求平均，结果形状为 [B, C, 21]
+        grid_features = grid_points.mean(dim=2)
         return grid_features
 
     def get_fc_output(self, pred_sdf, pred_deform, cube_weight):
@@ -611,13 +629,15 @@ class KLAutoEncoder(nn.Module):
         list_faces = []
         list_losses = []
         for b in range(batch):
-            sdf = pred_sdf[b, :, :]
+            sdf = pred_sdf[b, :]
+            # print(f"sdf min = {sdf.min()}, sdf max = {sdf.max()}")
             deform = pred_deform[b, :, :]
             weight = cube_weight[b, :, :]
+            # grid_verts = self.x_nx3 + (1.0 - 1e-8) / (self.voxel_grid_res * 2) * torch.tanh(deform)
             grid_verts = self.x_nx3 + (1.0 - 1e-8) / (self.voxel_grid_res * 2) * torch.tanh(deform)
             vertices, faces, L_dev = self.fc(grid_verts, sdf, self.cube_fx8, self.voxel_grid_res, beta_fx12=weight[:, :12],
                                         alpha_fx8=weight[:, 12:20],
-                                        gamma_f=weight[:, 20], training=True)
+                                        gamma_f=weight[:, 20], training=self.training)
             list_vertices.append(vertices)
             list_faces.append(faces)
             list_losses.append(L_dev)
@@ -629,20 +649,6 @@ class KLAutoEncoder(nn.Module):
         L_dev = torch.cat(list_losses).mean()
 
         return list_vertices, list_faces, L_dev
-
-    def render_mesh(self, list_vertices, list_faces, cam_mv_list, cam_mvp_list, render_res=512):
-        return_value_list = []
-        for i_mesh in range(len(list_vertices)):
-            flexicubes_mesh = Mesh(list_vertices[i_mesh], list_faces)
-
-            return_value = df_render.render_mesh_paper(
-                flexicubes_mesh,
-                cam_mv_list[i_mesh],
-                cam_mvp_list[i_mesh],
-                render_res,
-            )
-            return_value_list.append(return_value)
-
 
     # def get_random_cam(self, batch_size, fovy = np.deg2rad(45), iter_res=[512,512], cam_near_far=[0.1, 1000.0], cam_radius=1.5, device="cuda"):
     #     def get_random_camera():
@@ -659,12 +665,92 @@ class KLAutoEncoder(nn.Module):
     #     return torch.stack(mv_batch).to(device), torch.stack(mvp_batch).to(device)
     #     # return mv_batch, mvp_batch
 
+    def get_center_boundary_index(self, grid_res, device):
+        v = torch.zeros((grid_res + 1, grid_res + 1, grid_res + 1), dtype=torch.bool, device=device)
+        v[grid_res // 2 + 1, grid_res // 2 + 1, grid_res // 2 + 1] = True
+        center_indices = torch.nonzero(v.reshape(-1))
+
+        v[grid_res // 2 + 1, grid_res // 2 + 1, grid_res // 2 + 1] = False
+        v[:2, ...] = True
+        v[-2:, ...] = True
+        v[:, :2, ...] = True
+        v[:, -2:, ...] = True
+        v[:, :, :2] = True
+        v[:, :, -2:] = True
+        boundary_indices = torch.nonzero(v.reshape(-1))
+        return center_indices, boundary_indices
+
+    def postprocess_sdf(self, sdf, grid_res, center_indices, boundary_indices):
+        """
+        对预测的 sdf 进行后处理，确保在出现空形状（全部正或全部负）时，
+        强制在网格中产生正负交界。
+
+        Args:
+            sdf (torch.Tensor): 形状 [B, V] 的 SDF，V = (grid_res+1)^3。
+            grid_res (int): 网格分辨率。
+            center_indices (torch.Tensor): 网格中中心顶点的索引，形状 [num_center, 1]。
+            boundary_indices (torch.Tensor): 网格中边界顶点的索引，形状 [num_boundary, 1]。
+
+        Returns:
+            torch.Tensor: 后处理后的 sdf，形状依然为 [B, V]。
+        """
+        B = sdf.shape[0]
+        V_expected = (grid_res + 1) ** 3
+        assert sdf.shape[1] == V_expected, f"Expected {V_expected} elements, got {sdf.shape[1]}"
+
+        # 将 sdf reshape 成 [B, grid_res+1, grid_res+1, grid_res+1]
+        sdf_grid = sdf.reshape(B, grid_res + 1, grid_res + 1, grid_res + 1)
+        # 取内部体素（剔除边界），形状为 [B, N_inner]
+        sdf_inner = sdf_grid[:, 1:-1, 1:-1, 1:-1].reshape(B, -1)
+
+        # 统计内部正值和负值的数量
+        pos_count = (sdf_inner > 0).sum(dim=-1)
+        neg_count = (sdf_inner < 0).sum(dim=-1)
+
+        # 判断是否出现空形状：即内部全部正或全部负
+        zero_surface = (pos_count == 0) | (neg_count == 0)  # [B] 的布尔张量
+
+        if torch.sum(zero_surface).item() > 0:
+            # 构造一个 update_sdf，用于修正空形状
+            update_sdf = torch.zeros_like(sdf[0:1])  # [1, V]
+            max_sdf = sdf.max()
+            min_sdf = sdf.min()
+            # 注意 center_indices 和 boundary_indices 的 shape 是 [N, 1]，需 squeeze 以获得一维索引
+            center_idx = center_indices.squeeze(-1)
+            boundary_idx = boundary_indices.squeeze(-1)
+
+            # 对中心顶点加上 (1.0 - min_sdf) 使其变为正（或者至少大于0）
+            update_sdf[:, center_idx] += (1.0 - min_sdf)
+            # 对边界顶点加上 (-1 - max_sdf) 使其变为负
+            update_sdf[:, boundary_idx] += (-1 - max_sdf)
+
+            new_sdf = torch.zeros_like(sdf)
+            for i in range(B):
+                if zero_surface[i]:
+                    new_sdf[i:i + 1] = update_sdf  # 对于该 batch 用更新值
+            # 构造一个更新掩码，0的位置表示需要更新
+            update_mask = (new_sdf == 0).float()
+            sdf = sdf * update_mask + new_sdf * (1 - update_mask)
+
+            # 对于被更新的 batch，将其 sdf detach（使之不参与后续梯度更新）
+            sdf_list = []
+            for i in range(B):
+                if zero_surface[i]:
+                    sdf_list.append(sdf[i:i + 1].detach())
+                else:
+                    sdf_list.append(sdf[i:i + 1])
+            sdf = torch.cat(sdf_list, dim=0)
+        return sdf
+
 
     def get_predicted_fc(self, fc_latents):
         batch = fc_latents.shape[0]
-        pred_sdf = batch[:, :, 0] # [B, 129^3, 1]
-        pred_deform = batch[:, :, 1: 4] # [B, 129^3, 3]
-        pred_weight = batch[:, :, 4:] # [B, 129^3, 21]
+        pred_sdf = fc_latents[:, :, 0] # [B, 129^3]
+
+        center_indices, boundary_indices = self.get_center_boundary_index(self.voxel_grid_res, fc_latents.device)
+        pred_sdf = self.postprocess_sdf(pred_sdf, self.voxel_grid_res, center_indices, boundary_indices)
+        pred_deform = fc_latents[:, :, 1: 4] # [B, 129^3, 3]
+        pred_weight = fc_latents[:, :, 4:] # [B, 129^3, 21]
 
         cube_weight = self.get_cube_weight(pred_weight) # [B, 128^3, 21]
 
@@ -674,7 +760,7 @@ class KLAutoEncoder(nn.Module):
         for i_mesh in range(len(list_vertices)):
             flexicubes_mesh = Mesh(list_vertices[i_mesh], list_faces[i_mesh])
             list_flexicubes_mesh.append(flexicubes_mesh)
-
+        del list_vertices, list_faces
         return list_flexicubes_mesh, L_dev, pred_sdf, cube_weight
 
     def decode(self, x):
@@ -692,9 +778,9 @@ class KLAutoEncoder(nn.Module):
 
         # [B, 129^3, 3]
         queries = self.x_nx3.to(x.device, non_blocking=True)
-
-        # queries_embeddings = self.point_pos_embed(queries_repeated) # [B, M, C(512)]
-        latents = self.decoder_cross_attn(queries, context=x)
+        queries = queries.repeat(B, 1, 1)
+        queries_embeddings = self.point_pos_embed(queries) # [B, M, C(512)]
+        latents = self.decoder_cross_attn(queries_embeddings, context=x)
 
         # optional decoder feedforward
         if exists(self.decoder_ff):
